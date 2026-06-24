@@ -309,6 +309,14 @@ export const OssmBleController = () => {
     sendCommand(`set:depth:${nextDepth}`);
   }, [sendCommand, stroke]);
 
+  const handleDepthRelease = useCallback((value) => {
+    const nextDepth = clampPercent(value);
+    const nextPosition = positionFromDepth(nextDepth, stroke);
+    setDepth(nextDepth);
+    setPosition(nextPosition);
+    sendCommand(`set:depth:${nextDepth}`);
+  }, [sendCommand, stroke]);
+
   const handleStrokeRelease = useCallback(async (value) => {
     const nextStroke = clampPercent(value);
     const nextDepth = depthFromPosition(position, nextStroke);
@@ -696,6 +704,12 @@ export const OssmBleController = () => {
                   value={position}
                   onRelease={handlePositionRelease}
                   color="red"
+                />
+                <Slider
+                  label="Depth"
+                  value={depth}
+                  onRelease={handleDepthRelease}
+                  color="orange"
                 />
                 <Slider
                   label="Stroke"

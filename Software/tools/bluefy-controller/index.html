@@ -169,6 +169,10 @@
         <input id="position" type="range" min="0" max="100" value="0">
       </div>
       <div class="field">
+        <div class="row"><span class="label">Depth</span><span id="depthValue" class="value">50%</span></div>
+        <input id="depth" type="range" min="0" max="100" value="50">
+      </div>
+      <div class="field">
         <div class="row"><span class="label">Stroke</span><span id="strokeValue" class="value">50%</span></div>
         <input id="stroke" type="range" min="0" max="100" value="50">
       </div>
@@ -268,6 +272,7 @@
 
       updateSlider("speed", state.speed);
       updateSlider("position", state.position);
+      updateSlider("depth", state.depth);
       updateSlider("stroke", state.stroke);
       updateSlider("sensation", state.sensation);
       $("pattern").value = String(state.pattern);
@@ -375,7 +380,7 @@
       }
     }
 
-    for (const id of ["speed", "position", "stroke", "sensation"]) {
+    for (const id of ["speed", "position", "depth", "stroke", "sensation"]) {
       $(id).addEventListener("input", () => {
         $(`${id}Value`).textContent = `${$(id).value}%`;
       });
@@ -387,11 +392,19 @@
     $("position").addEventListener("change", () => {
       state.position = clampPercent($("position").value);
       state.depth = depthFromPosition(state.position, state.stroke);
+      updateSlider("depth", state.depth);
+      sendCommand(`set:depth:${state.depth}`).catch((err) => log(`ERR ${err.message}`));
+    });
+    $("depth").addEventListener("change", () => {
+      state.depth = clampPercent($("depth").value);
+      state.position = positionFromDepth(state.depth, state.stroke);
+      updateSlider("position", state.position);
       sendCommand(`set:depth:${state.depth}`).catch((err) => log(`ERR ${err.message}`));
     });
     $("stroke").addEventListener("change", async () => {
       state.stroke = clampPercent($("stroke").value);
       state.depth = depthFromPosition(state.position, state.stroke);
+      updateSlider("depth", state.depth);
       try {
         await sendCommand(`set:stroke:${state.stroke}`);
         await sendCommand(`set:depth:${state.depth}`);
