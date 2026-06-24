@@ -150,9 +150,10 @@ export const OssmBleController = () => {
   const positionTimerRef = useRef(null);
   const positionStopTimerRef = useRef(null);
   const positionMoveTokenRef = useRef(0);
+  const positioningActiveRef = useRef(false);
 
-  const POSITION_MOVE_MS = 700;
-  const POSITION_MOVE_SPEED = 35;
+  const POSITION_MOVE_MS = 800;
+  const POSITION_MOVE_SPEED = 15;
 
   const [isSupported, setIsSupported] = useState(true);
 
@@ -202,33 +203,29 @@ export const OssmBleController = () => {
     renameConfigCharacteristicRef.current = null;
     serverRef.current = null;
     bleQueueRef.current = Promise.resolve();
+    positioningActiveRef.current = false;
     setSpeed(0);
     setIsPaused(true);
     setWifiStatus(null);
   }, []);
 
-  const syncDeviceState = useCallback((state) => {
-    const firmwareStroke = state.stroke !== undefined ? clampPercent(state.stroke) : depth;
-    const firmwareDepth = state.depth !== undefined
-      ? clampPercent(state.depth)
-      : deepFromWindow(position, depth);
-    const nextPosition = clampPositionForDepth(
-      positionFromWindowSettings(firmwareDepth, firmwareStroke),
-      firmwareStroke,
-    );
-    const nextDepth = clampDepthForPosition(firmwareStroke, nextPosition);
-
-    if (state.speed !== undefined) {
+  const syncDeviceState = useCallback((state, { syncWindow = false } = {}) => {
+    if (state.speed !== undefined && !positioningActiveRef.current) {
       setSpeed(clampPercent(state.speed));
       setIsPaused(Number(state.speed) === 0);
     }
-    if (state.depth !== undefined) {
+    if (syncWindow && !positioningActiveRef.current && (state.depth !== undefined || state.stroke !== undefined)) {
+      const firmwareStroke = state.stroke !== undefined ? clampPercent(state.stroke) : depth;
+      const firmwareDepth = state.depth !== undefined
+        ? clampPercent(state.depth)
+        : deepFromWindow(position, depth);
+      const nextPosition = clampPositionForDepth(
+        positionFromWindowSettings(firmwareDepth, firmwareStroke),
+        firmwareStroke,
+      );
+      const nextDepth = clampDepthForPosition(firmwareStroke, nextPosition);
+
       setDepth(nextDepth);
-    }
-    if (state.stroke !== undefined) {
-      setDepth(nextDepth);
-    }
-    if (state.depth !== undefined || state.stroke !== undefined) {
       setPosition(nextPosition);
     }
     if (state.sensation !== undefined) {
@@ -245,7 +242,7 @@ export const OssmBleController = () => {
     return run;
   }, []);
 
-  const readDeviceState = useCallback(async ({ logState = false } = {}) => {
+  const readDeviceState = useCallback(async ({ logState = false, syncWindow = false } = {}) => {
     const stateChar = stateCharacteristicRef.current;
     if (!stateChar) {
       return null;
@@ -263,7 +260,7 @@ export const OssmBleController = () => {
       return null;
     }
     const nextState = JSON.parse(stateRaw);
-    syncDeviceState(nextState);
+    syncDeviceState(nextState, { syncWindow });
     return nextState;
   }, [addLog, syncDeviceState, withBleOperation]);
 
@@ -353,6 +350,7 @@ export const OssmBleController = () => {
     const nextPosition = clampPositionForDepth(positionValue, nextDepth);
     const token = positionMoveTokenRef.current + 1;
     positionMoveTokenRef.current = token;
+    positioningActiveRef.current = true;
 
     if (positionStopTimerRef.current) {
       clearTimeout(positionStopTimerRef.current);
@@ -362,12 +360,23 @@ export const OssmBleController = () => {
     try {
       const streamStroke = nextPosition >= 99 ? 0 : 1;
       const streamDepth = streamingDepthForAbsolutePosition(nextPosition, streamStroke);
-      const streamTarget = token % 2 === 0 ? 99 : 100;
+      const streamTarget = token % 2 === 0 ? 1 : 0;
 
       const sendIfCurrent = async (command) => {
         if (token !== positionMoveTokenRef.current) return false;
         const ok = await sendCommand(command);
         return ok && token === positionMoveTokenRef.current;
+      };
+      const finishPositioning = async () => {
+        if (token !== positionMoveTokenRef.current) return;
+        await sendCommand('set:speed:0');
+        if (token !== positionMoveTokenRef.current) return;
+        await sendCommand('go:menu');
+        if (token !== positionMoveTokenRef.current) return;
+        await sendMotionWindow(nextPosition, nextDepth);
+        if (token === positionMoveTokenRef.current) {
+          positioningActiveRef.current = false;
+        }
       };
 
       if (!await sendIfCurrent('set:speed:0')) return;
@@ -380,11 +389,11 @@ export const OssmBleController = () => {
 
       positionStopTimerRef.current = setTimeout(() => {
         if (token !== positionMoveTokenRef.current) return;
-        sendCommand('set:speed:0')
-          .then(() => sendMotionWindow(nextPosition, nextDepth))
+        finishPositioning()
           .catch((err) => addLog('ERR', err.message));
       }, POSITION_MOVE_MS + 250);
     } catch (err) {
+      positioningActiveRef.current = false;
       addLog('ERR', err.message);
     }
   }, [addLog, depth, position, sendCommand, sendMotionWindow]);
@@ -449,14 +458,16 @@ export const OssmBleController = () => {
       positionStopTimerRef.current = null;
     }
     positionMoveTokenRef.current += 1;
+    positioningActiveRef.current = false;
 
     if (isPaused) {
       const resumeSpeed = speed > 0 ? speed : pausedSpeed > 0 ? pausedSpeed : 30;
       setSpeed(resumeSpeed);
       setIsPaused(false);
+      await sendCommand('set:speed:0');
       await sendCommand('go:menu');
-      await sendCommand('go:strokeEngine');
       await sendMotionWindow(position, depth);
+      await sendCommand('go:strokeEngine');
       await sendCommand(`set:speed:${resumeSpeed}`);
     } else {
       setPausedSpeed(speed);
@@ -562,6 +573,14 @@ export const OssmBleController = () => {
       commandCharacteristicRef.current = commandChar;
       const stateChar = await service.getCharacteristic(OSSM_STATE_CHARACTERISTIC_UUID);
       stateCharacteristicRef.current = stateChar;
+      const encoder = new TextEncoder();
+
+      console.log('[OSSM BLE] Sending: set:speed:0');
+      addLog('TX', 'set:speed:0');
+      await commandChar.writeValue(encoder.encode('set:speed:0'));
+      console.log('[OSSM BLE] Sending: go:menu');
+      addLog('TX', 'go:menu');
+      await commandChar.writeValue(encoder.encode('go:menu'));
 
       // Get WiFi config characteristic
       try {
@@ -642,8 +661,6 @@ export const OssmBleController = () => {
         console.warn('[OSSM BLE] Could not read patterns, using defaults:', patternsErr);
       }
 
-      const encoder = new TextEncoder();
-
       // Disable physical speed knob override - allows BLE to control speed
       try {
         const speedKnobLimitChar = await service.getCharacteristic(OSSM_SPEED_KNOB_LIMIT_CHARACTERISTIC_UUID);
@@ -653,11 +670,6 @@ export const OssmBleController = () => {
       } catch (knobErr) {
         console.warn('Could not set speed knob limit:', knobErr);
       }
-
-      // Enter stroke engine mode
-      console.log('[OSSM BLE] Sending: go:strokeEngine');
-      addLog('TX', 'go:strokeEngine');
-      await commandChar.writeValue(encoder.encode('go:strokeEngine'));
 
       setDevice(bleDevice);
       setConnectionStatus('connected');

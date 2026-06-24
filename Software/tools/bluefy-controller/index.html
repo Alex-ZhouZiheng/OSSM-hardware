@@ -221,6 +221,7 @@
       positionTimer: null,
       positionStopTimer: null,
       positionMoveToken: 0,
+      positioningActive: false,
       speed: 0,
       position: 0,
       depth: 50,
@@ -230,8 +231,8 @@
     const encoder = new TextEncoder();
     const decoder = new TextDecoder();
     const $ = (id) => document.getElementById(id);
-    const POSITION_MOVE_MS = 700;
-    const POSITION_MOVE_SPEED = 35;
+    const POSITION_MOVE_MS = 800;
+    const POSITION_MOVE_SPEED = 15;
     const clampPercent = (value) => Math.max(0, Math.min(100, Number(value) || 0));
     const clampDepthForPosition = (depth, position) => {
       return Math.round(Math.min(clampPercent(depth), 100 - clampPercent(position)));
@@ -274,9 +275,9 @@
       updateSlider("position", state.position);
       updateSlider("depth", state.depth);
     }
-    function applyState(payload) {
-      if (payload.speed !== undefined) state.speed = clampPercent(payload.speed);
-      if (payload.depth !== undefined || payload.stroke !== undefined) {
+    function applyState(payload, { syncWindow = false } = {}) {
+      if (payload.speed !== undefined && !state.positioningActive) state.speed = clampPercent(payload.speed);
+      if (syncWindow && !state.positioningActive && (payload.depth !== undefined || payload.stroke !== undefined)) {
         const firmwareDepth = payload.depth !== undefined ? clampPercent(payload.depth) : deepFromWindow(state.position, state.depth);
         const firmwareStroke = payload.stroke !== undefined ? clampPercent(payload.stroke) : state.depth;
         state.position = clampPositionForDepth(positionFromWindowSettings(firmwareDepth, firmwareStroke), firmwareStroke);
@@ -315,18 +316,28 @@
     async function moveToShallowPosition() {
       if (!state.commandChar) return;
       const token = ++state.positionMoveToken;
+      state.positioningActive = true;
       clearTimeout(state.positionStopTimer);
       syncWindowSliders();
 
       try {
         const streamStroke = state.position >= 99 ? 0 : 1;
         const streamDepth = streamingDepthForAbsolutePosition(state.position, streamStroke);
-        const streamTarget = token % 2 === 0 ? 99 : 100;
+        const streamTarget = token % 2 === 0 ? 1 : 0;
 
         const sendIfCurrent = async (command) => {
           if (token !== state.positionMoveToken) return false;
           await sendCommand(command);
           return token === state.positionMoveToken;
+        };
+        const finishPositioning = async () => {
+          if (token !== state.positionMoveToken) return;
+          await sendCommand("set:speed:0");
+          if (token !== state.positionMoveToken) return;
+          await sendCommand("go:menu");
+          if (token !== state.positionMoveToken) return;
+          await sendMotionWindow();
+          if (token === state.positionMoveToken) state.positioningActive = false;
         };
 
         if (!await sendIfCurrent("set:speed:0")) return;
@@ -339,11 +350,11 @@
 
         state.positionStopTimer = setTimeout(() => {
           if (token !== state.positionMoveToken) return;
-          sendCommand("set:speed:0")
-            .then(() => sendMotionWindow())
+          finishPositioning()
             .catch((err) => log(`ERR ${err.message}`));
         }, POSITION_MOVE_MS + 250);
       } catch (err) {
+        state.positioningActive = false;
         log(`ERR ${err.message}`);
       }
     }
@@ -353,7 +364,7 @@
         void moveToShallowPosition();
       }, 180);
     }
-    async function readDeviceState({ logState = false } = {}) {
+    async function readDeviceState({ logState = false, syncWindow = false } = {}) {
       const stateChar = state.stateChar;
       if (!stateChar) return;
       const raw = decoder.decode(await withBleOperation(() => stateChar.readValue()));
@@ -362,7 +373,7 @@
         if (logState) log(`RX non-state: ${raw}`);
         return null;
       }
-      applyState(JSON.parse(raw));
+      applyState(JSON.parse(raw), { syncWindow });
     }
     function clearConnection() {
       clearInterval(state.heartbeat);
@@ -371,6 +382,7 @@
       state.heartbeat = null;
       state.positionTimer = null;
       state.positionStopTimer = null;
+      state.positioningActive = false;
       state.device = null;
       state.server = null;
       state.commandChar = null;
@@ -434,7 +446,8 @@
           loadPatterns(DEFAULT_PATTERNS);
         }
 
-        await sendCommand("go:strokeEngine");
+        await sendCommand("set:speed:0");
+        await sendCommand("go:menu");
         await readDeviceState({ logState: true });
         clearInterval(state.heartbeat);
         state.heartbeat = setInterval(() => {
@@ -501,12 +514,14 @@
       clearTimeout(state.positionTimer);
       clearTimeout(state.positionStopTimer);
       state.positionMoveToken++;
+      state.positioningActive = false;
       const nextSpeed = state.speed > 0 ? state.speed : 30;
       state.speed = nextSpeed;
       updateSlider("speed", nextSpeed);
-      sendCommand("go:menu")
-        .then(() => sendCommand("go:strokeEngine"))
+      sendCommand("set:speed:0")
+        .then(() => sendCommand("go:menu"))
         .then(() => sendMotionWindow())
+        .then(() => sendCommand("go:strokeEngine"))
         .then(() => sendCommand(`set:speed:${nextSpeed}`))
         .catch((err) => log(`ERR ${err.message}`));
     });
@@ -514,6 +529,7 @@
       clearTimeout(state.positionTimer);
       clearTimeout(state.positionStopTimer);
       state.positionMoveToken++;
+      state.positioningActive = false;
       state.speed = 0;
       updateSlider("speed", 0);
       sendCommand("set:speed:0").catch((err) => log(`ERR ${err.message}`));
