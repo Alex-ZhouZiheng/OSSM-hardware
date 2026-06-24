@@ -146,6 +146,7 @@ export const OssmBleController = () => {
 
   const serverRef = useRef(null);
   const heartbeatRef = useRef(null);
+  const bleQueueRef = useRef(Promise.resolve());
   const positionTimerRef = useRef(null);
   const positionStopTimerRef = useRef(null);
   const positionMoveTokenRef = useRef(0);
@@ -200,6 +201,7 @@ export const OssmBleController = () => {
     wifiConfigCharacteristicRef.current = null;
     renameConfigCharacteristicRef.current = null;
     serverRef.current = null;
+    bleQueueRef.current = Promise.resolve();
     setSpeed(0);
     setIsPaused(true);
     setWifiStatus(null);
@@ -237,20 +239,33 @@ export const OssmBleController = () => {
     }
   }, [depth, position]);
 
+  const withBleOperation = useCallback((task) => {
+    const run = bleQueueRef.current.catch(() => {}).then(task);
+    bleQueueRef.current = run.catch(() => {});
+    return run;
+  }, []);
+
   const readDeviceState = useCallback(async ({ logState = false } = {}) => {
-    if (!stateCharacteristicRef.current) {
+    const stateChar = stateCharacteristicRef.current;
+    if (!stateChar) {
       return null;
     }
 
-    const stateValue = await stateCharacteristicRef.current.readValue();
+    const stateValue = await withBleOperation(() => stateChar.readValue());
     const stateRaw = new TextDecoder().decode(stateValue);
     if (logState) {
       addLog('RX', `state: ${stateRaw}`);
     }
+    if (!stateRaw.trim().startsWith('{')) {
+      if (logState) {
+        addLog('RX', `non-state: ${stateRaw}`);
+      }
+      return null;
+    }
     const nextState = JSON.parse(stateRaw);
     syncDeviceState(nextState);
     return nextState;
-  }, [addLog, syncDeviceState]);
+  }, [addLog, syncDeviceState, withBleOperation]);
 
   const cleanupAndDisconnect = useCallback(async ({ sendStop = true } = {}) => {
     const commandChar = commandCharacteristicRef.current;
@@ -301,7 +316,8 @@ export const OssmBleController = () => {
   }, [cleanupAndDisconnect]);
 
   const sendCommand = useCallback(async (command) => {
-    if (!commandCharacteristicRef.current) {
+    const commandChar = commandCharacteristicRef.current;
+    if (!commandChar) {
       console.warn('Command characteristic not available');
       return false;
     }
@@ -311,7 +327,7 @@ export const OssmBleController = () => {
 
     try {
       const encoder = new TextEncoder();
-      await commandCharacteristicRef.current.writeValue(encoder.encode(command));
+      await withBleOperation(() => commandChar.writeValue(encoder.encode(command)));
       return true;
     } catch (err) {
       console.error('Failed to send command:', err);
@@ -319,7 +335,7 @@ export const OssmBleController = () => {
       setError(`Failed to send command: ${err.message}`);
       return false;
     }
-  }, [addLog]);
+  }, [addLog, withBleOperation]);
 
   const sendMotionWindow = useCallback(async (positionValue = position, depthValue = depth) => {
     const nextPosition = clampPositionForDepth(positionValue, depthValue);
@@ -348,13 +364,19 @@ export const OssmBleController = () => {
       const streamDepth = streamingDepthForAbsolutePosition(nextPosition, streamStroke);
       const streamTarget = token % 2 === 0 ? 99 : 100;
 
-      await sendCommand('set:speed:0');
-      await sendCommand('go:menu');
-      await sendCommand('go:streaming');
-      await sendCommand(`set:stroke:${streamStroke}`);
-      await sendCommand(`set:depth:${streamDepth}`);
-      await sendCommand(`set:speed:${POSITION_MOVE_SPEED}`);
-      await sendCommand(`stream:${streamTarget}:${POSITION_MOVE_MS}`);
+      const sendIfCurrent = async (command) => {
+        if (token !== positionMoveTokenRef.current) return false;
+        const ok = await sendCommand(command);
+        return ok && token === positionMoveTokenRef.current;
+      };
+
+      if (!await sendIfCurrent('set:speed:0')) return;
+      if (!await sendIfCurrent('go:menu')) return;
+      if (!await sendIfCurrent('go:streaming')) return;
+      if (!await sendIfCurrent(`set:stroke:${streamStroke}`)) return;
+      if (!await sendIfCurrent(`set:depth:${streamDepth}`)) return;
+      if (!await sendIfCurrent(`set:speed:${POSITION_MOVE_SPEED}`)) return;
+      if (!await sendIfCurrent(`stream:${streamTarget}:${POSITION_MOVE_MS}`)) return;
 
       positionStopTimerRef.current = setTimeout(() => {
         if (token !== positionMoveTokenRef.current) return;
@@ -392,6 +414,10 @@ export const OssmBleController = () => {
   }, [depth, scheduleMoveToShallowPosition]);
 
   const handlePositionRelease = useCallback((value) => {
+    if (positionTimerRef.current) {
+      clearTimeout(positionTimerRef.current);
+      positionTimerRef.current = null;
+    }
     const nextPosition = clampPositionForDepth(value, depth);
     setPosition(nextPosition);
     void moveToShallowPosition(nextPosition, depth);
@@ -414,6 +440,16 @@ export const OssmBleController = () => {
   }, [sendCommand]);
 
   const handlePauseToggle = useCallback(async () => {
+    if (positionTimerRef.current) {
+      clearTimeout(positionTimerRef.current);
+      positionTimerRef.current = null;
+    }
+    if (positionStopTimerRef.current) {
+      clearTimeout(positionStopTimerRef.current);
+      positionStopTimerRef.current = null;
+    }
+    positionMoveTokenRef.current += 1;
+
     if (isPaused) {
       const resumeSpeed = speed > 0 ? speed : pausedSpeed > 0 ? pausedSpeed : 30;
       setSpeed(resumeSpeed);
@@ -428,7 +464,7 @@ export const OssmBleController = () => {
       setIsPaused(true);
       await sendCommand('set:speed:0');
     }
-  }, [isPaused, speed, sendCommand]);
+  }, [depth, isPaused, pausedSpeed, position, sendCommand, sendMotionWindow, speed]);
 
   const handleDeviceNameSave = useCallback(async () => {
     if (!renameConfigCharacteristicRef.current) {

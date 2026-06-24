@@ -217,6 +217,7 @@
       commandChar: null,
       stateChar: null,
       heartbeat: null,
+      bleQueue: Promise.resolve(),
       positionTimer: null,
       positionStopTimer: null,
       positionMoveToken: 0,
@@ -291,9 +292,15 @@
       if (payload.state) setStatus(payload.state, "live");
     }
     async function sendCommand(command) {
-      if (!state.commandChar) throw new Error("Not connected");
+      const commandChar = state.commandChar;
+      if (!commandChar) throw new Error("Not connected");
       log(`TX ${command}`);
-      await state.commandChar.writeValue(encoder.encode(command));
+      await withBleOperation(() => commandChar.writeValue(encoder.encode(command)));
+    }
+    function withBleOperation(task) {
+      const run = state.bleQueue.catch(() => {}).then(task);
+      state.bleQueue = run.catch(() => {});
+      return run;
     }
     async function sendMotionWindow() {
       await sendCommand(`set:stroke:${state.depth}`);
@@ -316,13 +323,19 @@
         const streamDepth = streamingDepthForAbsolutePosition(state.position, streamStroke);
         const streamTarget = token % 2 === 0 ? 99 : 100;
 
-        await sendCommand("set:speed:0");
-        await sendCommand("go:menu");
-        await sendCommand("go:streaming");
-        await sendCommand(`set:stroke:${streamStroke}`);
-        await sendCommand(`set:depth:${streamDepth}`);
-        await sendCommand(`set:speed:${POSITION_MOVE_SPEED}`);
-        await sendCommand(`stream:${streamTarget}:${POSITION_MOVE_MS}`);
+        const sendIfCurrent = async (command) => {
+          if (token !== state.positionMoveToken) return false;
+          await sendCommand(command);
+          return token === state.positionMoveToken;
+        };
+
+        if (!await sendIfCurrent("set:speed:0")) return;
+        if (!await sendIfCurrent("go:menu")) return;
+        if (!await sendIfCurrent("go:streaming")) return;
+        if (!await sendIfCurrent(`set:stroke:${streamStroke}`)) return;
+        if (!await sendIfCurrent(`set:depth:${streamDepth}`)) return;
+        if (!await sendIfCurrent(`set:speed:${POSITION_MOVE_SPEED}`)) return;
+        if (!await sendIfCurrent(`stream:${streamTarget}:${POSITION_MOVE_MS}`)) return;
 
         state.positionStopTimer = setTimeout(() => {
           if (token !== state.positionMoveToken) return;
@@ -341,9 +354,14 @@
       }, 180);
     }
     async function readDeviceState({ logState = false } = {}) {
-      if (!state.stateChar) return;
-      const raw = decoder.decode(await state.stateChar.readValue());
+      const stateChar = state.stateChar;
+      if (!stateChar) return;
+      const raw = decoder.decode(await withBleOperation(() => stateChar.readValue()));
       if (logState) log(`RX state: ${raw}`);
+      if (!raw.trim().startsWith("{")) {
+        if (logState) log(`RX non-state: ${raw}`);
+        return null;
+      }
       applyState(JSON.parse(raw));
     }
     function clearConnection() {
@@ -357,6 +375,7 @@
       state.server = null;
       state.commandChar = null;
       state.stateChar = null;
+      state.bleQueue = Promise.resolve();
       setConnected(false);
       updateSlider("speed", 0);
     }
@@ -456,6 +475,7 @@
       scheduleMoveToShallowPosition();
     });
     $("position").addEventListener("change", () => {
+      clearTimeout(state.positionTimer);
       state.position = clampPositionForDepth($("position").value, state.depth);
       syncWindowSliders();
       void moveToShallowPosition();
@@ -478,6 +498,9 @@
       sendCommand(`set:pattern:${state.pattern}`).catch((err) => log(`ERR ${err.message}`));
     });
     $("start").addEventListener("click", () => {
+      clearTimeout(state.positionTimer);
+      clearTimeout(state.positionStopTimer);
+      state.positionMoveToken++;
       const nextSpeed = state.speed > 0 ? state.speed : 30;
       state.speed = nextSpeed;
       updateSlider("speed", nextSpeed);
@@ -488,6 +511,9 @@
         .catch((err) => log(`ERR ${err.message}`));
     });
     $("stop").addEventListener("click", () => {
+      clearTimeout(state.positionTimer);
+      clearTimeout(state.positionStopTimer);
+      state.positionMoveToken++;
       state.speed = 0;
       updateSlider("speed", 0);
       sendCommand("set:speed:0").catch((err) => log(`ERR ${err.message}`));
