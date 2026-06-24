@@ -64,6 +64,7 @@
 
 extern NimBLEServer* pServer;
 
+void noteBleActivity(const NimBLEConnInfo& connInfo);
 void nimbleLoop(void* pvParameters);
 void initNimble();
 

@@ -2,17 +2,14 @@
 #define OSSM_COMMUNICATION_COMMAND_HPP
 
 #include <queue>
-#include <regex>
-
 #include "Arduino.h"
 #include "NimBLECharacteristic.h"
 #include "NimBLEService.h"
 #include "NimBLEUUID.h"
+#include "command/commands.hpp"
+#include "nimble.h"
 #include "queue.h"
 #include "services/led.h"
-
-static const std::regex commandRegex(
-    R"(go:(simplePenetration|strokeEngine|streaming|menu)|set:(speed|stroke|depth|sensation|buffer|pattern):\d+|set:wifi:[^|]+\|.+|stream:\d+:\d+)");
 
 /** Handler class for characteristic actions */
 class CharacteristicCallbacks : public NimBLECharacteristicCallbacks {
@@ -22,14 +19,16 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 
     void onWrite(NimBLECharacteristic* pCharacteristic,
                  NimBLEConnInfo& connInfo) override {
+        noteBleActivity(connInfo);
         std::string cmd = pCharacteristic->getValue();
+        String command = String(cmd.c_str());
 
-        if (!std::regex_match(cmd, commandRegex)) {
+        if (!isValidOssmCommand(command)) {
             ESP_LOGD("NIMBLE_COMMAND", "Invalid command: %s", cmd.c_str());
             pCharacteristic->setValue("fail:" + String(cmd.c_str()));
             return;
         }
-        messageQueue.push(String(cmd.c_str()));
+        messageQueue.push(command);
 
         // Trigger LED communication pulse for received command
         pulseForCommunication();

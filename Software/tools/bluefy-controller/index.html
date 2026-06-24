@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>OSSM Bluefy Controller</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f4f6f8;
+      color: #17202a;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #eef2f5;
+    }
+    main {
+      width: min(720px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: max(18px, env(safe-area-inset-top)) 0 max(28px, env(safe-area-inset-bottom));
+    }
+    header, .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 24px;
+      line-height: 1.1;
+    }
+    section {
+      margin: 14px 0;
+      padding: 16px;
+      border: 1px solid #d8e0e7;
+      border-radius: 8px;
+      background: #fff;
+    }
+    button, select, input {
+      font: inherit;
+    }
+    button {
+      min-height: 44px;
+      border: 0;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-weight: 700;
+      color: #fff;
+      background: #2563eb;
+    }
+    button.secondary {
+      color: #17202a;
+      background: #dce4ea;
+    }
+    button.stop {
+      background: #d93025;
+    }
+    button:disabled {
+      opacity: .55;
+    }
+    .actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .field {
+      display: grid;
+      gap: 8px;
+      margin: 14px 0;
+    }
+    .label {
+      color: #52616f;
+      font-size: 14px;
+    }
+    .value {
+      font-variant-numeric: tabular-nums;
+      font-weight: 700;
+    }
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #52616f;
+      font-size: 14px;
+      white-space: nowrap;
+    }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #9aa7b2;
+    }
+    .dot.live { background: #169b62; }
+    .dot.warn { background: #cc7a00; }
+    input[type="range"], select {
+      width: 100%;
+      box-sizing: border-box;
+    }
+    input[type="range"] {
+      accent-color: #2563eb;
+    }
+    select {
+      min-height: 44px;
+      border: 1px solid #c8d2dc;
+      border-radius: 8px;
+      padding: 9px 10px;
+      background: #fff;
+      color: #17202a;
+    }
+    pre {
+      min-height: 160px;
+      max-height: 280px;
+      overflow: auto;
+      margin: 0;
+      padding: 12px;
+      border-radius: 8px;
+      background: #121820;
+      color: #dce8f2;
+      font-size: 12px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+    }
+    .muted {
+      color: #65717c;
+      font-size: 13px;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { background: #101418; color: #edf2f7; }
+      body { background: #0d1116; }
+      section { background: #171d24; border-color: #2d3844; }
+      .status, .label, .muted { color: #aab6c2; }
+      button.secondary { color: #edf2f7; background: #334150; }
+      select { border-color: #3b4855; background: #111820; color: #edf2f7; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>OSSM Controller</h1>
+      <div class="status"><span id="dot" class="dot"></span><span id="status">Disconnected</span></div>
+    </header>
+
+    <section>
+      <div class="actions">
+        <button id="connect">Connect</button>
+        <button id="disconnect" class="secondary" disabled>Disconnect</button>
+      </div>
+      <p class="muted">Use this page from an HTTPS URL in Bluefy. If the page is refreshed, hidden, or disconnected, the controller sends stop commands and releases Bluetooth.</p>
+    </section>
+
+    <section>
+      <div class="actions">
+        <button id="start">START</button>
+        <button id="stop" class="stop">STOP</button>
+      </div>
+    </section>
+
+    <section>
+      <div class="field">
+        <div class="row"><span class="label">Speed</span><span id="speedValue" class="value">0%</span></div>
+        <input id="speed" type="range" min="0" max="100" value="0">
+      </div>
+      <div class="field">
+        <div class="row"><span class="label">Position</span><span id="positionValue" class="value">0%</span></div>
+        <input id="position" type="range" min="0" max="100" value="0">
+      </div>
+      <div class="field">
+        <div class="row"><span class="label">Stroke</span><span id="strokeValue" class="value">50%</span></div>
+        <input id="stroke" type="range" min="0" max="100" value="50">
+      </div>
+      <div class="field">
+        <div class="row"><span class="label">Sensation</span><span id="sensationValue" class="value">50%</span></div>
+        <input id="sensation" type="range" min="0" max="100" value="50">
+      </div>
+      <div class="field">
+        <div class="row"><span class="label">Pattern</span></div>
+        <select id="pattern"></select>
+      </div>
+    </section>
+
+    <section>
+      <div class="actions">
+        <button id="refresh" class="secondary">Refresh State</button>
+        <button id="clearLog" class="secondary">Clear Log</button>
+      </div>
+    </section>
+
+    <section>
+      <pre id="log"></pre>
+    </section>
+  </main>
+
+  <script>
+    const UUIDS = {
+      service: "522b443a-4f53-534d-0001-420badbabe69",
+      command: "522b443a-4f53-534d-1000-420badbabe69",
+      speedKnob: "522b443a-4f53-534d-1010-420badbabe69",
+      state: "522b443a-4f53-534d-2000-420badbabe69",
+      patterns: "522b443a-4f53-534d-3000-420badbabe69"
+    };
+    const DEFAULT_PATTERNS = [
+      { idx: 0, name: "Simple Stroke" },
+      { idx: 1, name: "Teasing Pounding" },
+      { idx: 2, name: "Robo Stroke" },
+      { idx: 3, name: "Half'n'Half" },
+      { idx: 4, name: "Deeper" },
+      { idx: 5, name: "Stop'n'Go" },
+      { idx: 6, name: "Insist" }
+    ];
+    const state = {
+      device: null,
+      server: null,
+      commandChar: null,
+      stateChar: null,
+      heartbeat: null,
+      speed: 0,
+      position: 0,
+      stroke: 50,
+      depth: 50,
+      sensation: 50,
+      pattern: 0
+    };
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+    const $ = (id) => document.getElementById(id);
+    const clampPercent = (value) => Math.max(0, Math.min(100, Number(value) || 0));
+    const depthFromPosition = (position, stroke) => {
+      const nextStroke = clampPercent(stroke);
+      return Math.round(nextStroke + clampPercent(position) * (100 - nextStroke) / 100);
+    };
+    const positionFromDepth = (depth, stroke) => {
+      const nextDepth = clampPercent(depth);
+      const nextStroke = clampPercent(stroke);
+      const travel = 100 - nextStroke;
+      if (travel <= 0 || nextDepth <= nextStroke) return 0;
+      return Math.round(clampPercent((nextDepth - nextStroke) * 100 / travel));
+    };
+
+    function log(message) {
+      const now = new Date().toLocaleTimeString();
+      $("log").textContent = `[${now}] ${message}\n` + $("log").textContent;
+    }
+    function setStatus(text, kind = "") {
+      $("status").textContent = text;
+      $("dot").className = `dot ${kind}`;
+    }
+    function setConnected(connected) {
+      $("connect").disabled = connected;
+      $("disconnect").disabled = !connected;
+      setStatus(connected ? "Connected" : "Disconnected", connected ? "live" : "");
+    }
+    function updateSlider(id, value) {
+      const next = clampPercent(value);
+      $(id).value = next;
+      $(`${id}Value`).textContent = `${next}%`;
+    }
+    function applyState(payload) {
+      if (payload.speed !== undefined) state.speed = clampPercent(payload.speed);
+      if (payload.stroke !== undefined) state.stroke = clampPercent(payload.stroke);
+      if (payload.depth !== undefined) state.depth = clampPercent(payload.depth);
+      if (payload.sensation !== undefined) state.sensation = clampPercent(payload.sensation);
+      if (payload.pattern !== undefined) state.pattern = payload.pattern;
+      state.position = positionFromDepth(state.depth, state.stroke);
+
+      updateSlider("speed", state.speed);
+      updateSlider("position", state.position);
+      updateSlider("stroke", state.stroke);
+      updateSlider("sensation", state.sensation);
+      $("pattern").value = String(state.pattern);
+      if (payload.state) setStatus(payload.state, "live");
+    }
+    async function sendCommand(command) {
+      if (!state.commandChar) throw new Error("Not connected");
+      log(`TX ${command}`);
+      await state.commandChar.writeValue(encoder.encode(command));
+    }
+    async function readDeviceState({ logState = false } = {}) {
+      if (!state.stateChar) return;
+      const raw = decoder.decode(await state.stateChar.readValue());
+      if (logState) log(`RX state: ${raw}`);
+      applyState(JSON.parse(raw));
+    }
+    function clearConnection() {
+      clearInterval(state.heartbeat);
+      state.heartbeat = null;
+      state.device = null;
+      state.server = null;
+      state.commandChar = null;
+      state.stateChar = null;
+      setConnected(false);
+      updateSlider("speed", 0);
+    }
+    async function cleanupAndDisconnect({ sendStop = true } = {}) {
+      const commandChar = state.commandChar;
+      const server = state.server;
+      if (sendStop && commandChar) {
+        try {
+          log("TX set:speed:0");
+          await commandChar.writeValue(encoder.encode("set:speed:0"));
+          log("TX go:menu");
+          await commandChar.writeValue(encoder.encode("go:menu"));
+        } catch (err) {
+          log(`ERR cleanup: ${err.message}`);
+        }
+      }
+      try {
+        if (server && server.connected) server.disconnect();
+      } catch (err) {
+        log(`ERR disconnect: ${err.message}`);
+      }
+      clearConnection();
+    }
+    async function connect() {
+      if (!navigator.bluetooth) {
+        setStatus("Web Bluetooth unavailable", "warn");
+        log("ERR Web Bluetooth is not available in this browser");
+        return;
+      }
+      try {
+        setStatus("Connecting", "warn");
+        const device = await navigator.bluetooth.requestDevice({
+          filters: [{ services: [UUIDS.service] }],
+          optionalServices: [UUIDS.service]
+        });
+        device.addEventListener("gattserverdisconnected", clearConnection);
+        const server = await device.gatt.connect();
+        const service = await server.getPrimaryService(UUIDS.service);
+        state.device = device;
+        state.server = server;
+        state.commandChar = await service.getCharacteristic(UUIDS.command);
+        state.stateChar = await service.getCharacteristic(UUIDS.state);
+
+        try {
+          const speedKnobChar = await service.getCharacteristic(UUIDS.speedKnob);
+          await speedKnobChar.writeValue(encoder.encode("false"));
+          log("TX speedKnobLimit: false");
+        } catch (err) {
+          log(`WARN speed knob config unavailable: ${err.message}`);
+        }
+        try {
+          const patternsChar = await service.getCharacteristic(UUIDS.patterns);
+          const patterns = JSON.parse(decoder.decode(await patternsChar.readValue()));
+          loadPatterns(Array.isArray(patterns) && patterns.length ? patterns : DEFAULT_PATTERNS);
+        } catch (err) {
+          loadPatterns(DEFAULT_PATTERNS);
+        }
+
+        await sendCommand("go:strokeEngine");
+        await readDeviceState({ logState: true });
+        clearInterval(state.heartbeat);
+        state.heartbeat = setInterval(() => {
+          readDeviceState().catch((err) => {
+            log(`ERR heartbeat: ${err.message}`);
+            void cleanupAndDisconnect({ sendStop: false });
+          });
+        }, 1500);
+        setConnected(true);
+        log(`Connected to ${device.name || "OSSM"}`);
+      } catch (err) {
+        log(`ERR connect: ${err.message}`);
+        clearConnection();
+      }
+    }
+    function loadPatterns(patterns) {
+      $("pattern").innerHTML = "";
+      for (const pattern of patterns) {
+        const option = document.createElement("option");
+        option.value = pattern.idx;
+        option.textContent = pattern.name;
+        $("pattern").appendChild(option);
+      }
+    }
+
+    for (const id of ["speed", "position", "stroke", "sensation"]) {
+      $(id).addEventListener("input", () => {
+        $(`${id}Value`).textContent = `${$(id).value}%`;
+      });
+    }
+    $("speed").addEventListener("change", () => {
+      state.speed = clampPercent($("speed").value);
+      sendCommand(`set:speed:${state.speed}`).catch((err) => log(`ERR ${err.message}`));
+    });
+    $("position").addEventListener("change", () => {
+      state.position = clampPercent($("position").value);
+      state.depth = depthFromPosition(state.position, state.stroke);
+      sendCommand(`set:depth:${state.depth}`).catch((err) => log(`ERR ${err.message}`));
+    });
+    $("stroke").addEventListener("change", async () => {
+      state.stroke = clampPercent($("stroke").value);
+      state.depth = depthFromPosition(state.position, state.stroke);
+      try {
+        await sendCommand(`set:stroke:${state.stroke}`);
+        await sendCommand(`set:depth:${state.depth}`);
+      } catch (err) {
+        log(`ERR ${err.message}`);
+      }
+    });
+    $("sensation").addEventListener("change", () => {
+      state.sensation = clampPercent($("sensation").value);
+      sendCommand(`set:sensation:${state.sensation}`).catch((err) => log(`ERR ${err.message}`));
+    });
+    $("pattern").addEventListener("change", () => {
+      state.pattern = Number($("pattern").value);
+      sendCommand(`set:pattern:${state.pattern}`).catch((err) => log(`ERR ${err.message}`));
+    });
+    $("start").addEventListener("click", () => {
+      const nextSpeed = state.speed > 0 ? state.speed : 30;
+      state.speed = nextSpeed;
+      updateSlider("speed", nextSpeed);
+      sendCommand(`set:speed:${nextSpeed}`).catch((err) => log(`ERR ${err.message}`));
+    });
+    $("stop").addEventListener("click", () => {
+      state.speed = 0;
+      updateSlider("speed", 0);
+      sendCommand("set:speed:0").catch((err) => log(`ERR ${err.message}`));
+    });
+    $("connect").addEventListener("click", connect);
+    $("disconnect").addEventListener("click", () => cleanupAndDisconnect({ sendStop: true }));
+    $("refresh").addEventListener("click", () => readDeviceState({ logState: true }).catch((err) => log(`ERR ${err.message}`)));
+    $("clearLog").addEventListener("click", () => $("log").textContent = "");
+    window.addEventListener("pagehide", () => void cleanupAndDisconnect({ sendStop: true }));
+    window.addEventListener("beforeunload", () => void cleanupAndDisconnect({ sendStop: true }));
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") void cleanupAndDisconnect({ sendStop: true });
+    });
+
+    loadPatterns(DEFAULT_PATTERNS);
+    log("Controller ready");
+  </script>
+</body>
+</html>

@@ -31,9 +31,18 @@ static long lostConnectionTime = 0;
 static int speedOnLostConnection = 0;
 static const unsigned long RAMP_DURATION_MS =
     2000;  // Duration for speed ramp to zero
+static const unsigned long STALE_CONNECTION_TIMEOUT_MS = 8000;
+static const uint16_t NO_BLE_CONN_HANDLE = UINT16_MAX;
+static unsigned long lastBleActivityTime = 0;
+static uint16_t activeBleConnHandle = NO_BLE_CONN_HANDLE;
 
 double easeInOutSine(double t) {
     return 0.5 * (1 + sin(3.1415926 * (t - 0.5)));
+}
+
+void noteBleActivity(const NimBLEConnInfo& connInfo) {
+    activeBleConnHandle = connInfo.getConnHandle();
+    lastBleActivityTime = millis();
 }
 
 /** Handler class for server actions */
@@ -49,6 +58,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
             ossm->setBLEConnectionStatus(true);
         }
 
+        noteBleActivity(connInfo);
         lostConnectionTime = 0;
     }
 
@@ -63,6 +73,11 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         if (ossm && pServer->getConnectedCount() == 0) {
             ossm->setBLEConnectionStatus(false);
             ossm->ble_click("go:menu");
+        }
+
+        if (activeBleConnHandle == connInfo.getConnHandle()) {
+            activeBleConnHandle = NO_BLE_CONN_HANDLE;
+            lastBleActivityTime = 0;
         }
 
         // Capture current speed when connection is lost
@@ -90,6 +105,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 class FTSCallbacks : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic* pCharacteristic,
                  NimBLEConnInfo& connInfo) override {
+        noteBleActivity(connInfo);
         std::string value = pCharacteristic->getValue();
 
         // Expected format: [position, timeHigh, timeLow]
@@ -111,6 +127,7 @@ class FTSCallbacks : public NimBLECharacteristicCallbacks {
 
     void onRead(NimBLECharacteristic* pCharacteristic,
                 NimBLEConnInfo& connInfo) override {
+        noteBleActivity(connInfo);
         Serial.println("FTS read callback");
         std::string value = pCharacteristic->getValue();
         String ftsValue = String(value.c_str());
@@ -216,6 +233,26 @@ void nimbleLoop(void* pvParameters) {
         }
 
         int currentConnCount = pServer->getConnectedCount();
+        unsigned long now = millis();
+        if (activeBleConnHandle != NO_BLE_CONN_HANDLE &&
+            lastBleActivityTime > 0 &&
+            now - lastBleActivityTime > STALE_CONNECTION_TIMEOUT_MS) {
+            ESP_LOGW(NIMBLE_TAG,
+                     "BLE connection stale for %lu ms, stopping motion and "
+                     "disconnecting handle %u",
+                     now - lastBleActivityTime, activeBleConnHandle);
+            if (ossm) {
+                ossm->ble_click("set:speed:0");
+                ossm->ble_click("go:menu");
+                ossm->setBLEConnectionStatus(false);
+            }
+            pServer->disconnect(activeBleConnHandle);
+            activeBleConnHandle = NO_BLE_CONN_HANDLE;
+            lastBleActivityTime = 0;
+            lostConnectionTime = 0;
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
 
         // Clear last state when connection count changes
         if (currentConnCount != lastConnCount) {

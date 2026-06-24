@@ -5,6 +5,14 @@
 #include "NimBLECharacteristic.h"
 #include "NimBLEService.h"
 #include "NimBLEUUID.h"
+#include "nimble.h"
+
+class StateCallbacks : public NimBLECharacteristicCallbacks {
+    void onRead(NimBLECharacteristic* pCharacteristic,
+                NimBLEConnInfo& connInfo) override {
+        noteBleActivity(connInfo);
+    }
+} inline stateCallbacks;
 
 inline NimBLECharacteristic* initStateCharacteristic(NimBLEService* pService,
                                               NimBLEUUID uuid) {
@@ -13,6 +21,7 @@ inline NimBLECharacteristic* initStateCharacteristic(NimBLEService* pService,
         uuid, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
     static const char boot_state[] PROGMEM = "ok:boot";
     pStateChar->setValue(String(FPSTR(boot_state)));
+    pStateChar->setCallbacks(&stateCallbacks);
 
     return pStateChar;
 }

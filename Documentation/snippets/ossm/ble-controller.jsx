@@ -25,6 +25,26 @@ export const OssmBleController = () => {
     return typeof navigator !== 'undefined' && 'bluetooth' in navigator;
   };
 
+  const clampPercent = (value) => Math.max(0, Math.min(100, Number(value) || 0));
+
+  const depthFromPosition = (positionValue, strokeValue) => {
+    const nextStroke = clampPercent(strokeValue);
+    const nextPosition = clampPercent(positionValue);
+    return Math.round(nextStroke + (nextPosition * (100 - nextStroke)) / 100);
+  };
+
+  const positionFromDepth = (depthValue, strokeValue) => {
+    const nextDepth = clampPercent(depthValue);
+    const nextStroke = clampPercent(strokeValue);
+    const travel = 100 - nextStroke;
+
+    if (travel <= 0 || nextDepth <= nextStroke) {
+      return 0;
+    }
+
+    return Math.round(clampPercent(((nextDepth - nextStroke) * 100) / travel));
+  };
+
   // Slider component with smooth dragging and send-on-release
   const Slider = ({ label, value, onRelease, color = 'violet', disabled = false }) => {
     const [localValue, setLocalValue] = useState(value);
@@ -89,6 +109,7 @@ export const OssmBleController = () => {
   const [speed, setSpeed] = useState(0);
   const [pausedSpeed, setPausedSpeed] = useState(0);
   const [depth, setDepth] = useState(50);
+  const [position, setPosition] = useState(0);
   const [stroke, setStroke] = useState(50);
   const [sensation, setSensation] = useState(50);
   const [pattern, setPattern] = useState(0);
@@ -111,10 +132,12 @@ export const OssmBleController = () => {
   const [activeTab, setActiveTab] = useState('controller');
 
   const commandCharacteristicRef = useRef(null);
+  const stateCharacteristicRef = useRef(null);
   const wifiConfigCharacteristicRef = useRef(null);
   const renameConfigCharacteristicRef = useRef(null);
 
   const serverRef = useRef(null);
+  const heartbeatRef = useRef(null);
 
   const [isSupported, setIsSupported] = useState(true);
 
@@ -141,6 +164,112 @@ export const OssmBleController = () => {
     };
     setLogs((prev) => [...prev.slice(-99), entry]); // Keep last 100 entries
   }, []);
+
+  const clearConnectionState = useCallback(() => {
+    if (heartbeatRef.current) {
+      clearInterval(heartbeatRef.current);
+      heartbeatRef.current = null;
+    }
+
+    setDevice(null);
+    setConnectionStatus('disconnected');
+    commandCharacteristicRef.current = null;
+    stateCharacteristicRef.current = null;
+    wifiConfigCharacteristicRef.current = null;
+    renameConfigCharacteristicRef.current = null;
+    serverRef.current = null;
+    setSpeed(0);
+    setIsPaused(true);
+    setWifiStatus(null);
+  }, []);
+
+  const syncDeviceState = useCallback((state) => {
+    const nextStroke = state.stroke !== undefined ? clampPercent(state.stroke) : stroke;
+    const nextDepth = state.depth !== undefined ? clampPercent(state.depth) : depth;
+
+    if (state.speed !== undefined) {
+      setSpeed(clampPercent(state.speed));
+      setIsPaused(Number(state.speed) === 0);
+    }
+    if (state.depth !== undefined) {
+      setDepth(nextDepth);
+    }
+    if (state.stroke !== undefined) {
+      setStroke(nextStroke);
+    }
+    if (state.depth !== undefined || state.stroke !== undefined) {
+      setPosition(positionFromDepth(nextDepth, nextStroke));
+    }
+    if (state.sensation !== undefined) {
+      setSensation(clampPercent(state.sensation));
+    }
+    if (state.pattern !== undefined) {
+      setPattern(state.pattern);
+    }
+  }, [depth, stroke]);
+
+  const readDeviceState = useCallback(async ({ logState = false } = {}) => {
+    if (!stateCharacteristicRef.current) {
+      return null;
+    }
+
+    const stateValue = await stateCharacteristicRef.current.readValue();
+    const stateRaw = new TextDecoder().decode(stateValue);
+    if (logState) {
+      addLog('RX', `state: ${stateRaw}`);
+    }
+    const nextState = JSON.parse(stateRaw);
+    syncDeviceState(nextState);
+    return nextState;
+  }, [addLog, syncDeviceState]);
+
+  const cleanupAndDisconnect = useCallback(async ({ sendStop = true } = {}) => {
+    const commandChar = commandCharacteristicRef.current;
+    const server = serverRef.current;
+
+    if (sendStop && commandChar) {
+      try {
+        const encoder = new TextEncoder();
+        addLog('TX', 'set:speed:0');
+        await commandChar.writeValue(encoder.encode('set:speed:0'));
+        addLog('TX', 'go:menu');
+        await commandChar.writeValue(encoder.encode('go:menu'));
+      } catch (err) {
+        console.warn('Could not send disconnect commands:', err);
+      }
+    }
+
+    try {
+      if (server?.connected) {
+        server.disconnect();
+      }
+    } catch (err) {
+      console.warn('Could not disconnect GATT server:', err);
+    }
+
+    clearConnectionState();
+  }, [addLog, clearConnectionState]);
+
+  useEffect(() => {
+    const handlePageExit = () => {
+      void cleanupAndDisconnect({ sendStop: true });
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        void cleanupAndDisconnect({ sendStop: true });
+      }
+    };
+
+    window.addEventListener('pagehide', handlePageExit);
+    window.addEventListener('beforeunload', handlePageExit);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener('pagehide', handlePageExit);
+      window.removeEventListener('beforeunload', handlePageExit);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [cleanupAndDisconnect]);
 
   const sendCommand = useCallback(async (command) => {
     if (!commandCharacteristicRef.current) {
@@ -172,15 +301,22 @@ export const OssmBleController = () => {
     sendCommand(`set:speed:${value}`);
   }, [sendCommand, isPaused]);
 
-  const handleDepthRelease = useCallback((value) => {
-    setDepth(value);
-    sendCommand(`set:depth:${value}`);
-  }, [sendCommand]);
+  const handlePositionRelease = useCallback((value) => {
+    const nextPosition = clampPercent(value);
+    const nextDepth = depthFromPosition(nextPosition, stroke);
+    setPosition(nextPosition);
+    setDepth(nextDepth);
+    sendCommand(`set:depth:${nextDepth}`);
+  }, [sendCommand, stroke]);
 
-  const handleStrokeRelease = useCallback((value) => {
-    setStroke(value);
-    sendCommand(`set:stroke:${value}`);
-  }, [sendCommand]);
+  const handleStrokeRelease = useCallback(async (value) => {
+    const nextStroke = clampPercent(value);
+    const nextDepth = depthFromPosition(position, nextStroke);
+    setStroke(nextStroke);
+    setDepth(nextDepth);
+    await sendCommand(`set:stroke:${nextStroke}`);
+    await sendCommand(`set:depth:${nextDepth}`);
+  }, [position, sendCommand]);
 
   const handleSensationRelease = useCallback((value) => {
     setSensation(value);
@@ -290,12 +426,7 @@ export const OssmBleController = () => {
       });
 
       bleDevice.addEventListener('gattserverdisconnected', () => {
-        setConnectionStatus('disconnected');
-        setDevice(null);
-        commandCharacteristicRef.current = null;
-        serverRef.current = null;
-        setSpeed(0);
-        setIsPaused(true);
+        clearConnectionState();
       });
 
       const server = await bleDevice.gatt.connect();
@@ -305,6 +436,8 @@ export const OssmBleController = () => {
 
       const commandChar = await service.getCharacteristic(OSSM_COMMAND_CHARACTERISTIC_UUID);
       commandCharacteristicRef.current = commandChar;
+      const stateChar = await service.getCharacteristic(OSSM_STATE_CHARACTERISTIC_UUID);
+      stateCharacteristicRef.current = stateChar;
 
       // Get WiFi config characteristic
       try {
@@ -331,41 +464,14 @@ export const OssmBleController = () => {
 
       // Read current state from device
       try {
-        const stateChar = await service.getCharacteristic(OSSM_STATE_CHARACTERISTIC_UUID);
-        const stateValue = await stateChar.readValue();
-        const stateRaw = new TextDecoder().decode(stateValue);
-        addLog('RX', `state: ${stateRaw}`);
-        const state = JSON.parse(stateRaw);
+        const state = await readDeviceState({ logState: true });
         console.log('[OSSM BLE] Parsed state:', {
-          speed: state.speed,
-          depth: state.depth,
-          stroke: state.stroke,
-          sensation: state.sensation,
-          pattern: state.pattern,
+          speed: state?.speed,
+          depth: state?.depth,
+          stroke: state?.stroke,
+          sensation: state?.sensation,
+          pattern: state?.pattern,
         });
-
-        // Update UI with device state
-        if (state.speed !== undefined) {
-          console.log('[OSSM BLE] Setting speed:', state.speed);
-          setSpeed(state.speed);
-          setIsPaused(state.speed === 0);
-        }
-        if (state.depth !== undefined) {
-          console.log('[OSSM BLE] Setting depth:', state.depth);
-          setDepth(state.depth);
-        }
-        if (state.stroke !== undefined) {
-          console.log('[OSSM BLE] Setting stroke:', state.stroke);
-          setStroke(state.stroke);
-        }
-        if (state.sensation !== undefined) {
-          console.log('[OSSM BLE] Setting sensation:', state.sensation);
-          setSensation(state.sensation);
-        }
-        if (state.pattern !== undefined) {
-          console.log('[OSSM BLE] Setting pattern:', state.pattern);
-          setPattern(state.pattern);
-        }
       } catch (stateErr) {
         console.warn('[OSSM BLE] Could not read state:', stateErr);
       }
@@ -431,38 +537,23 @@ export const OssmBleController = () => {
 
       setDevice(bleDevice);
       setConnectionStatus('connected');
+      clearInterval(heartbeatRef.current);
+      heartbeatRef.current = setInterval(() => {
+        readDeviceState().catch((heartbeatErr) => {
+          console.warn('[OSSM BLE] Heartbeat failed:', heartbeatErr);
+          addLog('ERR', `Heartbeat failed: ${heartbeatErr.message}`);
+          void cleanupAndDisconnect({ sendStop: false });
+        });
+      }, 1500);
     } catch (err) {
       console.error('Connection failed:', err);
       setError(err.message);
-      setConnectionStatus('disconnected');
+      clearConnectionState();
     }
   };
 
   const handleDisconnect = async () => {
-    if (commandCharacteristicRef.current) {
-      try {
-        const encoder = new TextEncoder();
-        addLog('TX', 'set:speed:0');
-        await commandCharacteristicRef.current.writeValue(encoder.encode('set:speed:0'));
-        addLog('TX', 'go:menu');
-        await commandCharacteristicRef.current.writeValue(encoder.encode('go:menu'));
-      } catch (err) {
-        console.warn('Could not send disconnect commands:', err);
-      }
-    }
-
-    if (serverRef.current) {
-      serverRef.current.disconnect();
-    }
-
-    setDevice(null);
-    setConnectionStatus('disconnected');
-    commandCharacteristicRef.current = null;
-    wifiConfigCharacteristicRef.current = null;
-    serverRef.current = null;
-    setSpeed(0);
-    setIsPaused(true);
-    setWifiStatus(null);
+    await cleanupAndDisconnect({ sendStop: true });
   };
 
   // Show unsupported message if Web Bluetooth is not available
@@ -601,9 +692,9 @@ export const OssmBleController = () => {
               {/* Other controls */}
               <div className="mb-6 space-y-4">
                 <Slider
-                  label="Depth"
-                  value={depth}
-                  onRelease={handleDepthRelease}
+                  label="Position"
+                  value={position}
+                  onRelease={handlePositionRelease}
                   color="red"
                 />
                 <Slider
