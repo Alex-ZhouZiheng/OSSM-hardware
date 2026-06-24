@@ -173,10 +173,6 @@
         <input id="depth" type="range" min="0" max="100" value="50">
       </div>
       <div class="field">
-        <div class="row"><span class="label">Stroke</span><span id="strokeValue" class="value">50%</span></div>
-        <input id="stroke" type="range" min="0" max="100" value="50">
-      </div>
-      <div class="field">
         <div class="row"><span class="label">Sensation</span><span id="sensationValue" class="value">50%</span></div>
         <input id="sensation" type="range" min="0" max="100" value="50">
       </div>
@@ -221,9 +217,11 @@
       commandChar: null,
       stateChar: null,
       heartbeat: null,
+      positionTimer: null,
+      positionStopTimer: null,
+      positionMoveToken: 0,
       speed: 0,
       position: 0,
-      stroke: 50,
       depth: 50,
       sensation: 50,
       pattern: 0
@@ -231,17 +229,22 @@
     const encoder = new TextEncoder();
     const decoder = new TextDecoder();
     const $ = (id) => document.getElementById(id);
+    const POSITION_MOVE_MS = 700;
+    const POSITION_MOVE_SPEED = 35;
     const clampPercent = (value) => Math.max(0, Math.min(100, Number(value) || 0));
-    const depthFromPosition = (position, stroke) => {
-      const nextStroke = clampPercent(stroke);
-      return Math.round(nextStroke + clampPercent(position) * (100 - nextStroke) / 100);
+    const clampDepthForPosition = (depth, position) => {
+      return Math.round(Math.min(clampPercent(depth), 100 - clampPercent(position)));
     };
-    const positionFromDepth = (depth, stroke) => {
-      const nextDepth = clampPercent(depth);
-      const nextStroke = clampPercent(stroke);
-      const travel = 100 - nextStroke;
-      if (travel <= 0 || nextDepth <= nextStroke) return 0;
-      return Math.round(clampPercent((nextDepth - nextStroke) * 100 / travel));
+    const clampPositionForDepth = (position, depth) => {
+      return Math.round(Math.min(clampPercent(position), 100 - clampPercent(depth)));
+    };
+    const deepFromWindow = (position, depth) => {
+      const nextPosition = clampPositionForDepth(position, depth);
+      const nextDepth = clampDepthForPosition(depth, nextPosition);
+      return nextPosition + nextDepth;
+    };
+    const positionFromWindowSettings = (firmwareDepth, stroke) => {
+      return Math.round(clampPercent(clampPercent(firmwareDepth) - clampPercent(stroke)));
     };
 
     function log(message) {
@@ -262,18 +265,27 @@
       $(id).value = next;
       $(`${id}Value`).textContent = `${next}%`;
     }
-    function applyState(payload) {
-      if (payload.speed !== undefined) state.speed = clampPercent(payload.speed);
-      if (payload.stroke !== undefined) state.stroke = clampPercent(payload.stroke);
-      if (payload.depth !== undefined) state.depth = clampPercent(payload.depth);
-      if (payload.sensation !== undefined) state.sensation = clampPercent(payload.sensation);
-      if (payload.pattern !== undefined) state.pattern = payload.pattern;
-      state.position = positionFromDepth(state.depth, state.stroke);
-
-      updateSlider("speed", state.speed);
+    function syncWindowSliders() {
+      state.position = clampPositionForDepth(state.position, state.depth);
+      state.depth = clampDepthForPosition(state.depth, state.position);
+      $("position").max = String(100 - state.depth);
+      $("depth").max = String(100 - state.position);
       updateSlider("position", state.position);
       updateSlider("depth", state.depth);
-      updateSlider("stroke", state.stroke);
+    }
+    function applyState(payload) {
+      if (payload.speed !== undefined) state.speed = clampPercent(payload.speed);
+      if (payload.depth !== undefined || payload.stroke !== undefined) {
+        const firmwareDepth = payload.depth !== undefined ? clampPercent(payload.depth) : deepFromWindow(state.position, state.depth);
+        const firmwareStroke = payload.stroke !== undefined ? clampPercent(payload.stroke) : state.depth;
+        state.position = clampPositionForDepth(positionFromWindowSettings(firmwareDepth, firmwareStroke), firmwareStroke);
+        state.depth = clampDepthForPosition(firmwareStroke, state.position);
+      }
+      if (payload.sensation !== undefined) state.sensation = clampPercent(payload.sensation);
+      if (payload.pattern !== undefined) state.pattern = payload.pattern;
+
+      updateSlider("speed", state.speed);
+      syncWindowSliders();
       updateSlider("sensation", state.sensation);
       $("pattern").value = String(state.pattern);
       if (payload.state) setStatus(payload.state, "live");
@@ -283,6 +295,51 @@
       log(`TX ${command}`);
       await state.commandChar.writeValue(encoder.encode(command));
     }
+    async function sendMotionWindow() {
+      await sendCommand(`set:stroke:${state.depth}`);
+      await sendCommand(`set:depth:${deepFromWindow(state.position, state.depth)}`);
+    }
+    function streamingDepthForAbsolutePosition(position, streamingStroke) {
+      const nextPosition = clampPercent(position);
+      const nextStroke = clampPercent(streamingStroke);
+      if (nextStroke >= 100) return 100;
+      return Math.round(clampPercent((nextPosition * 100) / (100 - nextStroke)));
+    }
+    async function moveToShallowPosition() {
+      if (!state.commandChar) return;
+      const token = ++state.positionMoveToken;
+      clearTimeout(state.positionStopTimer);
+      syncWindowSliders();
+
+      try {
+        const streamStroke = state.position >= 99 ? 0 : 1;
+        const streamDepth = streamingDepthForAbsolutePosition(state.position, streamStroke);
+        const streamTarget = token % 2 === 0 ? 99 : 100;
+
+        await sendCommand("set:speed:0");
+        await sendCommand("go:menu");
+        await sendCommand("go:streaming");
+        await sendCommand(`set:stroke:${streamStroke}`);
+        await sendCommand(`set:depth:${streamDepth}`);
+        await sendCommand(`set:speed:${POSITION_MOVE_SPEED}`);
+        await sendCommand(`stream:${streamTarget}:${POSITION_MOVE_MS}`);
+
+        state.positionStopTimer = setTimeout(() => {
+          if (token !== state.positionMoveToken) return;
+          sendCommand("set:speed:0")
+            .then(() => sendMotionWindow())
+            .catch((err) => log(`ERR ${err.message}`));
+        }, POSITION_MOVE_MS + 250);
+      } catch (err) {
+        log(`ERR ${err.message}`);
+      }
+    }
+    function scheduleMoveToShallowPosition() {
+      clearTimeout(state.positionTimer);
+      state.positionTimer = setTimeout(() => {
+        void moveToShallowPosition();
+      }, 180);
+    }
     async function readDeviceState({ logState = false } = {}) {
       if (!state.stateChar) return;
       const raw = decoder.decode(await state.stateChar.readValue());
@@ -291,7 +348,11 @@
     }
     function clearConnection() {
       clearInterval(state.heartbeat);
+      clearTimeout(state.positionTimer);
+      clearTimeout(state.positionStopTimer);
       state.heartbeat = null;
+      state.positionTimer = null;
+      state.positionStopTimer = null;
       state.device = null;
       state.server = null;
       state.commandChar = null;
@@ -380,7 +441,7 @@
       }
     }
 
-    for (const id of ["speed", "position", "depth", "stroke", "sensation"]) {
+    for (const id of ["speed", "position", "depth", "sensation"]) {
       $(id).addEventListener("input", () => {
         $(`${id}Value`).textContent = `${$(id).value}%`;
       });
@@ -389,28 +450,24 @@
       state.speed = clampPercent($("speed").value);
       sendCommand(`set:speed:${state.speed}`).catch((err) => log(`ERR ${err.message}`));
     });
+    $("position").addEventListener("input", () => {
+      state.position = clampPositionForDepth($("position").value, state.depth);
+      syncWindowSliders();
+      scheduleMoveToShallowPosition();
+    });
     $("position").addEventListener("change", () => {
-      state.position = clampPercent($("position").value);
-      state.depth = depthFromPosition(state.position, state.stroke);
-      updateSlider("depth", state.depth);
-      sendCommand(`set:depth:${state.depth}`).catch((err) => log(`ERR ${err.message}`));
+      state.position = clampPositionForDepth($("position").value, state.depth);
+      syncWindowSliders();
+      void moveToShallowPosition();
+    });
+    $("depth").addEventListener("input", () => {
+      state.depth = clampDepthForPosition($("depth").value, state.position);
+      syncWindowSliders();
     });
     $("depth").addEventListener("change", () => {
-      state.depth = clampPercent($("depth").value);
-      state.position = positionFromDepth(state.depth, state.stroke);
-      updateSlider("position", state.position);
-      sendCommand(`set:depth:${state.depth}`).catch((err) => log(`ERR ${err.message}`));
-    });
-    $("stroke").addEventListener("change", async () => {
-      state.stroke = clampPercent($("stroke").value);
-      state.depth = depthFromPosition(state.position, state.stroke);
-      updateSlider("depth", state.depth);
-      try {
-        await sendCommand(`set:stroke:${state.stroke}`);
-        await sendCommand(`set:depth:${state.depth}`);
-      } catch (err) {
-        log(`ERR ${err.message}`);
-      }
+      state.depth = clampDepthForPosition($("depth").value, state.position);
+      syncWindowSliders();
+      sendMotionWindow().catch((err) => log(`ERR ${err.message}`));
     });
     $("sensation").addEventListener("change", () => {
       state.sensation = clampPercent($("sensation").value);
@@ -424,7 +481,11 @@
       const nextSpeed = state.speed > 0 ? state.speed : 30;
       state.speed = nextSpeed;
       updateSlider("speed", nextSpeed);
-      sendCommand(`set:speed:${nextSpeed}`).catch((err) => log(`ERR ${err.message}`));
+      sendCommand("go:menu")
+        .then(() => sendCommand("go:strokeEngine"))
+        .then(() => sendMotionWindow())
+        .then(() => sendCommand(`set:speed:${nextSpeed}`))
+        .catch((err) => log(`ERR ${err.message}`));
     });
     $("stop").addEventListener("click", () => {
       state.speed = 0;
@@ -442,6 +503,7 @@
     });
 
     loadPatterns(DEFAULT_PATTERNS);
+    syncWindowSliders();
     log("Controller ready");
   </script>
 </body>

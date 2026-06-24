@@ -27,26 +27,33 @@ export const OssmBleController = () => {
 
   const clampPercent = (value) => Math.max(0, Math.min(100, Number(value) || 0));
 
-  const depthFromPosition = (positionValue, strokeValue) => {
-    const nextStroke = clampPercent(strokeValue);
-    const nextPosition = clampPercent(positionValue);
-    return Math.round(nextStroke + (nextPosition * (100 - nextStroke)) / 100);
+  const clampDepthForPosition = (depthValue, positionValue) => {
+    return Math.round(Math.min(clampPercent(depthValue), 100 - clampPercent(positionValue)));
   };
 
-  const positionFromDepth = (depthValue, strokeValue) => {
-    const nextDepth = clampPercent(depthValue);
-    const nextStroke = clampPercent(strokeValue);
-    const travel = 100 - nextStroke;
+  const clampPositionForDepth = (positionValue, depthValue) => {
+    return Math.round(Math.min(clampPercent(positionValue), 100 - clampPercent(depthValue)));
+  };
 
-    if (travel <= 0 || nextDepth <= nextStroke) {
-      return 0;
-    }
+  const deepFromWindow = (positionValue, depthValue) => {
+    const nextPosition = clampPositionForDepth(positionValue, depthValue);
+    const nextDepth = clampDepthForPosition(depthValue, nextPosition);
+    return nextPosition + nextDepth;
+  };
 
-    return Math.round(clampPercent(((nextDepth - nextStroke) * 100) / travel));
+  const positionFromWindowSettings = (firmwareDepthValue, strokeValue) => {
+    return Math.round(clampPercent(clampPercent(firmwareDepthValue) - clampPercent(strokeValue)));
+  };
+
+  const streamingDepthForAbsolutePosition = (positionValue, streamingStrokeValue) => {
+    const nextPosition = clampPercent(positionValue);
+    const nextStroke = clampPercent(streamingStrokeValue);
+    if (nextStroke >= 100) return 100;
+    return Math.round(clampPercent((nextPosition * 100) / (100 - nextStroke)));
   };
 
   // Slider component with smooth dragging and send-on-release
-  const Slider = ({ label, value, onRelease, color = 'violet', disabled = false }) => {
+  const Slider = ({ label, value, onRelease, onInput, color = 'violet', disabled = false, max = 100 }) => {
     const [localValue, setLocalValue] = useState(value);
     const isDraggingRef = useRef(false);
 
@@ -69,7 +76,9 @@ export const OssmBleController = () => {
       const newValue = parseInt(e.target.value, 10);
       isDraggingRef.current = true;
       setLocalValue(newValue);
-      // No longer calling onChange - just update local state for smooth dragging
+      if (onInput) {
+        onInput(newValue);
+      }
     };
 
     const handleRelease = () => {
@@ -90,7 +99,7 @@ export const OssmBleController = () => {
         <input
           type="range"
           min="0"
-          max="100"
+          max={max}
           value={localValue}
           onChange={handleChange}
           onMouseUp={handleRelease}
@@ -110,7 +119,6 @@ export const OssmBleController = () => {
   const [pausedSpeed, setPausedSpeed] = useState(0);
   const [depth, setDepth] = useState(50);
   const [position, setPosition] = useState(0);
-  const [stroke, setStroke] = useState(50);
   const [sensation, setSensation] = useState(50);
   const [pattern, setPattern] = useState(0);
   const [patterns, setPatterns] = useState(DEFAULT_PATTERNS);
@@ -138,6 +146,12 @@ export const OssmBleController = () => {
 
   const serverRef = useRef(null);
   const heartbeatRef = useRef(null);
+  const positionTimerRef = useRef(null);
+  const positionStopTimerRef = useRef(null);
+  const positionMoveTokenRef = useRef(0);
+
+  const POSITION_MOVE_MS = 700;
+  const POSITION_MOVE_SPEED = 35;
 
   const [isSupported, setIsSupported] = useState(true);
 
@@ -170,6 +184,14 @@ export const OssmBleController = () => {
       clearInterval(heartbeatRef.current);
       heartbeatRef.current = null;
     }
+    if (positionTimerRef.current) {
+      clearTimeout(positionTimerRef.current);
+      positionTimerRef.current = null;
+    }
+    if (positionStopTimerRef.current) {
+      clearTimeout(positionStopTimerRef.current);
+      positionStopTimerRef.current = null;
+    }
 
     setDevice(null);
     setConnectionStatus('disconnected');
@@ -184,8 +206,15 @@ export const OssmBleController = () => {
   }, []);
 
   const syncDeviceState = useCallback((state) => {
-    const nextStroke = state.stroke !== undefined ? clampPercent(state.stroke) : stroke;
-    const nextDepth = state.depth !== undefined ? clampPercent(state.depth) : depth;
+    const firmwareStroke = state.stroke !== undefined ? clampPercent(state.stroke) : depth;
+    const firmwareDepth = state.depth !== undefined
+      ? clampPercent(state.depth)
+      : deepFromWindow(position, depth);
+    const nextPosition = clampPositionForDepth(
+      positionFromWindowSettings(firmwareDepth, firmwareStroke),
+      firmwareStroke,
+    );
+    const nextDepth = clampDepthForPosition(firmwareStroke, nextPosition);
 
     if (state.speed !== undefined) {
       setSpeed(clampPercent(state.speed));
@@ -195,10 +224,10 @@ export const OssmBleController = () => {
       setDepth(nextDepth);
     }
     if (state.stroke !== undefined) {
-      setStroke(nextStroke);
+      setDepth(nextDepth);
     }
     if (state.depth !== undefined || state.stroke !== undefined) {
-      setPosition(positionFromDepth(nextDepth, nextStroke));
+      setPosition(nextPosition);
     }
     if (state.sensation !== undefined) {
       setSensation(clampPercent(state.sensation));
@@ -206,7 +235,7 @@ export const OssmBleController = () => {
     if (state.pattern !== undefined) {
       setPattern(state.pattern);
     }
-  }, [depth, stroke]);
+  }, [depth, position]);
 
   const readDeviceState = useCallback(async ({ logState = false } = {}) => {
     if (!stateCharacteristicRef.current) {
@@ -292,6 +321,61 @@ export const OssmBleController = () => {
     }
   }, [addLog]);
 
+  const sendMotionWindow = useCallback(async (positionValue = position, depthValue = depth) => {
+    const nextPosition = clampPositionForDepth(positionValue, depthValue);
+    const nextDepth = clampDepthForPosition(depthValue, nextPosition);
+    await sendCommand(`set:stroke:${nextDepth}`);
+    await sendCommand(`set:depth:${deepFromWindow(nextPosition, nextDepth)}`);
+  }, [depth, position, sendCommand]);
+
+  const moveToShallowPosition = useCallback(async (positionValue = position, depthValue = depth) => {
+    if (!commandCharacteristicRef.current) {
+      return;
+    }
+
+    const nextDepth = clampDepthForPosition(depthValue, positionValue);
+    const nextPosition = clampPositionForDepth(positionValue, nextDepth);
+    const token = positionMoveTokenRef.current + 1;
+    positionMoveTokenRef.current = token;
+
+    if (positionStopTimerRef.current) {
+      clearTimeout(positionStopTimerRef.current);
+      positionStopTimerRef.current = null;
+    }
+
+    try {
+      const streamStroke = nextPosition >= 99 ? 0 : 1;
+      const streamDepth = streamingDepthForAbsolutePosition(nextPosition, streamStroke);
+      const streamTarget = token % 2 === 0 ? 99 : 100;
+
+      await sendCommand('set:speed:0');
+      await sendCommand('go:menu');
+      await sendCommand('go:streaming');
+      await sendCommand(`set:stroke:${streamStroke}`);
+      await sendCommand(`set:depth:${streamDepth}`);
+      await sendCommand(`set:speed:${POSITION_MOVE_SPEED}`);
+      await sendCommand(`stream:${streamTarget}:${POSITION_MOVE_MS}`);
+
+      positionStopTimerRef.current = setTimeout(() => {
+        if (token !== positionMoveTokenRef.current) return;
+        sendCommand('set:speed:0')
+          .then(() => sendMotionWindow(nextPosition, nextDepth))
+          .catch((err) => addLog('ERR', err.message));
+      }, POSITION_MOVE_MS + 250);
+    } catch (err) {
+      addLog('ERR', err.message);
+    }
+  }, [addLog, depth, position, sendCommand, sendMotionWindow]);
+
+  const scheduleMoveToShallowPosition = useCallback((positionValue, depthValue) => {
+    if (positionTimerRef.current) {
+      clearTimeout(positionTimerRef.current);
+    }
+    positionTimerRef.current = setTimeout(() => {
+      void moveToShallowPosition(positionValue, depthValue);
+    }, 180);
+  }, [moveToShallowPosition]);
+
   // Send commands on slider release
   const handleSpeedRelease = useCallback((value) => {
     setSpeed(value);
@@ -301,30 +385,23 @@ export const OssmBleController = () => {
     sendCommand(`set:speed:${value}`);
   }, [sendCommand, isPaused]);
 
-  const handlePositionRelease = useCallback((value) => {
-    const nextPosition = clampPercent(value);
-    const nextDepth = depthFromPosition(nextPosition, stroke);
+  const handlePositionInput = useCallback((value) => {
+    const nextPosition = clampPositionForDepth(value, depth);
     setPosition(nextPosition);
-    setDepth(nextDepth);
-    sendCommand(`set:depth:${nextDepth}`);
-  }, [sendCommand, stroke]);
+    scheduleMoveToShallowPosition(nextPosition, depth);
+  }, [depth, scheduleMoveToShallowPosition]);
+
+  const handlePositionRelease = useCallback((value) => {
+    const nextPosition = clampPositionForDepth(value, depth);
+    setPosition(nextPosition);
+    void moveToShallowPosition(nextPosition, depth);
+  }, [depth, moveToShallowPosition]);
 
   const handleDepthRelease = useCallback((value) => {
-    const nextDepth = clampPercent(value);
-    const nextPosition = positionFromDepth(nextDepth, stroke);
+    const nextDepth = clampDepthForPosition(value, position);
     setDepth(nextDepth);
-    setPosition(nextPosition);
-    sendCommand(`set:depth:${nextDepth}`);
-  }, [sendCommand, stroke]);
-
-  const handleStrokeRelease = useCallback(async (value) => {
-    const nextStroke = clampPercent(value);
-    const nextDepth = depthFromPosition(position, nextStroke);
-    setStroke(nextStroke);
-    setDepth(nextDepth);
-    await sendCommand(`set:stroke:${nextStroke}`);
-    await sendCommand(`set:depth:${nextDepth}`);
-  }, [position, sendCommand]);
+    void sendMotionWindow(position, nextDepth);
+  }, [position, sendMotionWindow]);
 
   const handleSensationRelease = useCallback((value) => {
     setSensation(value);
@@ -338,9 +415,12 @@ export const OssmBleController = () => {
 
   const handlePauseToggle = useCallback(async () => {
     if (isPaused) {
-      const resumeSpeed = speed > 0 ? speed : pausedSpeed;
+      const resumeSpeed = speed > 0 ? speed : pausedSpeed > 0 ? pausedSpeed : 30;
       setSpeed(resumeSpeed);
       setIsPaused(false);
+      await sendCommand('go:menu');
+      await sendCommand('go:strokeEngine');
+      await sendMotionWindow(position, depth);
       await sendCommand(`set:speed:${resumeSpeed}`);
     } else {
       setPausedSpeed(speed);
@@ -702,20 +782,17 @@ export const OssmBleController = () => {
                 <Slider
                   label="Position"
                   value={position}
+                  max={100 - depth}
+                  onInput={handlePositionInput}
                   onRelease={handlePositionRelease}
                   color="red"
                 />
                 <Slider
                   label="Depth"
                   value={depth}
+                  max={100 - position}
                   onRelease={handleDepthRelease}
                   color="orange"
-                />
-                <Slider
-                  label="Stroke"
-                  value={stroke}
-                  onRelease={handleStrokeRelease}
-                  color="green"
                 />
                 <Slider
                   label="Sensation"

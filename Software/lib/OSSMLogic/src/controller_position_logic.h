@@ -10,24 +10,28 @@ inline float clampPercent(float value) {
     return std::max(0.0f, std::min(100.0f, value));
 }
 
-inline int depthFromPosition(float positionPct, float strokePct) {
-    float stroke = clampPercent(strokePct);
+inline int clampDepthForPosition(float depthPct, float positionPct) {
     float position = clampPercent(positionPct);
-    float travel = 100.0f - stroke;
-    return static_cast<int>(std::lround(stroke + (position * travel / 100.0f)));
+    float maxDepth = 100.0f - position;
+    return static_cast<int>(std::lround(std::min(clampPercent(depthPct), maxDepth)));
 }
 
-inline int positionFromDepth(float depthPct, float strokePct) {
-    float stroke = clampPercent(strokePct);
+inline int clampPositionForDepth(float positionPct, float depthPct) {
     float depth = clampPercent(depthPct);
-    float travel = 100.0f - stroke;
+    float maxPosition = 100.0f - depth;
+    return static_cast<int>(std::lround(std::min(clampPercent(positionPct), maxPosition)));
+}
 
-    if (travel <= 0.0f || depth <= stroke) {
-        return 0;
-    }
+inline int deepFromWindow(float positionPct, float depthPct) {
+    int position = clampPositionForDepth(positionPct, depthPct);
+    int depth = clampDepthForPosition(depthPct, position);
+    return position + depth;
+}
 
-    return static_cast<int>(
-        std::lround(clampPercent((depth - stroke) * 100.0f / travel)));
+inline int positionFromWindowSettings(float firmwareDepthPct, float strokePct) {
+    float firmwareDepth = clampPercent(firmwareDepthPct);
+    float stroke = clampPercent(strokePct);
+    return static_cast<int>(std::lround(clampPercent(firmwareDepth - stroke)));
 }
 
 }  // namespace controller_position_logic
