@@ -233,6 +233,8 @@
     const $ = (id) => document.getElementById(id);
     const POSITION_MOVE_MS = 800;
     const POSITION_MOVE_SPEED = 15;
+    const STREAMING_READY_DELAY_MS = 500;
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const clampPercent = (value) => Math.max(0, Math.min(100, Number(value) || 0));
     const clampDepthForPosition = (depth, position) => {
       return Math.round(Math.min(clampPercent(depth), 100 - clampPercent(position)));
@@ -343,9 +345,13 @@
         if (!await sendIfCurrent("set:speed:0")) return;
         if (!await sendIfCurrent("go:menu")) return;
         if (!await sendIfCurrent("go:streaming")) return;
+        await sleep(STREAMING_READY_DELAY_MS);
+        if (token !== state.positionMoveToken) return;
         if (!await sendIfCurrent(`set:stroke:${streamStroke}`)) return;
         if (!await sendIfCurrent(`set:depth:${streamDepth}`)) return;
         if (!await sendIfCurrent(`set:speed:${POSITION_MOVE_SPEED}`)) return;
+        await sleep(80);
+        if (token !== state.positionMoveToken) return;
         if (!await sendIfCurrent(`stream:${streamTarget}:${POSITION_MOVE_MS}`)) return;
 
         state.positionStopTimer = setTimeout(() => {

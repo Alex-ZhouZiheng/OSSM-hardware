@@ -154,6 +154,8 @@ export const OssmBleController = () => {
 
   const POSITION_MOVE_MS = 800;
   const POSITION_MOVE_SPEED = 15;
+  const STREAMING_READY_DELAY_MS = 500;
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
   const [isSupported, setIsSupported] = useState(true);
 
@@ -382,9 +384,13 @@ export const OssmBleController = () => {
       if (!await sendIfCurrent('set:speed:0')) return;
       if (!await sendIfCurrent('go:menu')) return;
       if (!await sendIfCurrent('go:streaming')) return;
+      await sleep(STREAMING_READY_DELAY_MS);
+      if (token !== positionMoveTokenRef.current) return;
       if (!await sendIfCurrent(`set:stroke:${streamStroke}`)) return;
       if (!await sendIfCurrent(`set:depth:${streamDepth}`)) return;
       if (!await sendIfCurrent(`set:speed:${POSITION_MOVE_SPEED}`)) return;
+      await sleep(80);
+      if (token !== positionMoveTokenRef.current) return;
       if (!await sendIfCurrent(`stream:${streamTarget}:${POSITION_MOVE_MS}`)) return;
 
       positionStopTimerRef.current = setTimeout(() => {
